@@ -1,43 +1,44 @@
 from azure.cosmos import CosmosClient, PartitionKey, exceptions
+from azure.cosmos.aio import CosmosClient as CCA
 
 import os
 import random
-import json
+import asyncio
 
 URL = os.environ['ACCOUNT_URI']
 KEY = os.environ['ACCOUNT_KEY']
 REQUEST_TIMEOUT = 120000 # 120 seconds
-
 THROUGHPUT = 5000 # 5000 RUs
+
+PARTITION_KEY = PartitionKey(path='/id')
 
 def create_client(consistency_level):
     client = CosmosClient(URL, credential=KEY, consistency_level=consistency_level, request_timeout=REQUEST_TIMEOUT)
     return client
 
-def create_database(client, database_name):
-    database = None
-    try:
-        database = client.create_database_if_not_exists(database_name, offer_throughput=THROUGHPUT)
-    except exceptions.CosmosResourceExistsError as e:
-        print(e)
+def create_client_async(consistency_level):
+    client = CCA(URL, credential=KEY, consistency_level=consistency_level, request_timeout=REQUEST_TIMEOUT)
+    return client
 
+def create_database(client, database_name):
+    database = client.create_database_if_not_exists(database_name, offer_throughput=THROUGHPUT)
     return database
 
 
-if __name__ == '__main__':
+def run_exercise():
     # Create two clients = one client with Session consistency and one with Eventual consistency, both with a request timeout of 120
-    client1 = create_client("Session")
-    client2 = create_client("Eventual")
+    client = create_client("Session")
+    # client = create_client("Eventual")
 
     # Use either of those clients to create two databases with the following settings:
     # - ID = "Cowboys", throughput = 5000 RUs
     # - ID = "Pirates"
-    cowboys_db = create_database(client1, "Cowboys")
-    pirates_db = create_database(client2, "Pirates")
+    cowboys_db = create_database(client, "Cowboys")
+    pirates_db = create_database(client, "Pirates")
 
     # Print out the list of databases
     print("\nList of Databases:")
-    for db in client1.list_databases():
+    for db in client.list_databases():
         print("Databases ID: {}".format(db['id']))
 
     # In the Cowboys database, create 10 containers with ID = Simon{1-10} and PartitionKey with path = '/id'
@@ -54,11 +55,11 @@ if __name__ == '__main__':
     # - ID = "All Players", PartitionKey = id, throughput = 3000
     top_players_container = pirates_db.create_container_if_not_exists(
         id='Top_Players',
-        partition_key=PartitionKey(path='/id'),
+        partition_key=PARTITION_KEY,
         default_ttl=1000)
     all_players_container = pirates_db.create_container_if_not_exists(
         id='All_Players',
-        partition_key=PartitionKey(path='/id'),
+        partition_key=PARTITION_KEY,
         offer_throughput=3000)
 
     # Print out the list of containers in this database
@@ -105,8 +106,7 @@ if __name__ == '__main__':
             query="SELECT * FROM Top_Players",
             enable_cross_partition_query=True):
         if item['game_difference'] > 10:
-            print(f'Top Player ID: {item["id"]}, Game Difference: {item['game_difference']}')
-
+            print(f'Top Player ID: {item["id"]}, Game Difference: {item["game_difference"]}')
 
     # Once all of this has been done, you will:
     # - delete all containers in each database
@@ -123,19 +123,93 @@ if __name__ == '__main__':
         pirates_db.delete_container(container['id'])
 
     print("\nDeleting all database in each client")
-    print("- Client1")
-    for db in client1.list_databases():
+    print("- Client")
+    for db in client.list_databases():
         print("Database ID: {}".format(db['id']))
-        client1.delete_database(db['id'])
-
-    print("- Client2")
-    for db in client2.list_databases():
-        print("Database ID: {}".format(db['id']))
-        client2.delete_database(db['id'])
-
+        client.delete_database(db['id'])
+    #
+    # print("- Client2")
+    # for db in client2.list_databases():
+    #     print("Database ID: {}".format(db['id']))
+    #     client2.delete_database(db['id'])
 
     print("Completed!")
 
+async def delete_all_containers(db):
+    async for container in db.list_containers():
+        print("Container ID: {}".format(container['id']))
+        await db.delete_container(container['id'])
+
+async def delete_all_databases(client):
+    async for db in client.list_databases():
+        print("Database ID: {}".format(db['id']))
+        await client.delete_database(db['id'])
+
+async def run_exercises_async(consistency_level):
+    async with (create_client_async(consistency_level) as client):
+        cowboys_db = await client.create_database_if_not_exists("Cowboys_Async", offer_throughput=THROUGHPUT)
+        pirates_db = await client.create_database_if_not_exists("Pirates_Async", offer_throughput=THROUGHPUT)
+
+        print("\nList of Databases:")
+        async for db in client.list_databases():
+            print("Databases ID: {}".format(db['id']))
+
+        print("\nCreate Containers:")
+        for i in range(10):
+            await cowboys_db.create_container_if_not_exists(id=f'Simon{i + 1}', partition_key=PARTITION_KEY)
+
+        top_players_container = await pirates_db.create_container_if_not_exists(
+            id='Top_Players',
+            partition_key=PARTITION_KEY,
+            default_ttl=1000)
+        all_players_container = await pirates_db.create_container_if_not_exists(
+            id='All_Players',
+            partition_key=PARTITION_KEY,
+            offer_throughput=3000)
+
+        # Print out the list of containers in this database
+        print("\nList of containers in Pirates DB:")
+        async for container in pirates_db.list_containers():
+            print("Container ID: {}".format(container['id']))
+
+        print("\nInserting items to All_Player container")
+        for i in range(1, 11):
+            await all_players_container.upsert_item({
+                'id': f'Player{i}',
+                'total_wins': random.randint(10, 50),
+                'total_losses': random.randint(10, 20),
+            })
+
+        async for item in all_players_container.query_items(
+                query="SELECT * FROM All_Players"):
+            game_diff = item['total_wins'] - item['total_losses']
+
+            if game_diff > 5:
+                await top_players_container.upsert_item({
+                    'id': item['id'],
+                    'game_difference': game_diff,
+                })
+
+        print('\nTop Players with game_difference greater than 10')
+        async for item in top_players_container.query_items(
+                query="SELECT * FROM Top_Players"):
+            if item['game_difference'] > 10:
+                print(f'Top Player ID: {item["id"]}, Game Difference: {item["game_difference"]}')
+
+        print("\nDeleting all containers in each database")
+        await delete_all_containers(cowboys_db)
+        await delete_all_containers(pirates_db)
+
+        print("\nDeleting all database in each client")
+        await delete_all_databases(client)
+
+    print("Completed!")
+
+
+if __name__ == '__main__':
+    # run_exercise()
+    # asyncio.run(run_exercises_async("Session"))
+    asyncio.run(run_exercises_async("Eventual"))
 
 
 
